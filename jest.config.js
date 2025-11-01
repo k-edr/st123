@@ -1,3 +1,6 @@
 module.exports = {
-    "testEnvironment": "jsdom"
+    "testEnvironment": "jsdom",
+    "transformIgnorePatterns": [
+        "/node_modules/(?!three|dat.gui)/"
+    ]
 };

@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from '../node_modules/three/build/three.module.js';
 import Satellite from './Satellite.js';
 
 export function createTestPoints(scene, testPoints) {
@@ -24,16 +24,17 @@ export function createTestPoints(scene, testPoints) {
     }
 }
 
-export function updateSatelliteOrbits(satellites, params) {
-    const G = 6.67430e-11; // Gravitational constant
-    const M = 5.972e24; // Mass of the Earth (or planet)
-    const r = 145000; // Orbital radius in meters (60km + 85km)
-    const orbitalSpeed = Math.sqrt((G * M) / r);
+export function updateSatelliteOrbits(satellites, params, delta) {
+    // Use a consistent, simulation-scaled gravitational parameter (mu = G * M)
+    // This value is chosen for stable and visually appealing orbits in the simulation's scale.
+    const mu = 200000;
+    const r = 145; // Orbital radius in scene units
+
+    const orbitalSpeed = Math.sqrt(mu / r);
 
     satellites.forEach(satellite => {
-        // Orbit around the planet's y-axis
-        const angle = (orbitalSpeed / r) * 0.016 * params.timeScale; // Time step of 16ms for 60fps
-        const axis = new THREE.Vector3(0, 1, 0);
+        const angle = (orbitalSpeed / r) * delta * params.timeScale;
+        const axis = new THREE.Vector3(0, 1, 0); // Orbit around the Y-axis
         satellite.mesh.position.applyAxisAngle(axis, angle);
         satellite.coverageSphere.position.copy(satellite.mesh.position);
     });
@@ -54,9 +55,7 @@ export function updateNeighborDetection(satellites, params) {
 }
 
 export function checkNetworkStatus(satellites, params) {
-    if (satellites.length === 0) {
-        return;
-    }
+    if (satellites.length === 0) return;
 
     const anchor = satellites[0];
     anchor.setStatus('Green');
@@ -76,14 +75,10 @@ export function checkNetworkStatus(satellites, params) {
 
 export function bfs(start, end) {
     const queue = [start];
-    const visited = new Set();
-    visited.add(start);
-
+    const visited = new Set([start]);
     while (queue.length > 0) {
         const current = queue.shift();
-        if (current === end) {
-            return true;
-        }
+        if (current === end) return true;
         for (const neighbor of current.neighbors) {
             if (!visited.has(neighbor)) {
                 visited.add(neighbor);
@@ -94,82 +89,102 @@ export function bfs(start, end) {
     return false;
 }
 
-export function deployConstellation(scene, satellites, params) {
-    // Phase 1: Place anchor satellite
-    if (satellites.length === 0) {
-        const anchorPosition = new THREE.Vector3(0, 145, 0);
-        const anchor = new Satellite(anchorPosition, scene, params.satelliteCoverageRadius);
-        satellites.push(anchor);
-    }
+export function seedAnchor(scene, satellites, params) {
+    const anchorPosition = new THREE.Vector3(0, 145, 0);
+    const anchor = new Satellite(anchorPosition, scene, params.satelliteCoverageRadius);
+    satellites.push(anchor);
+}
 
-    // Phase 2: Build a stable ring around the anchor
-    if (satellites.length === 1) {
-        const anchor = satellites[0];
-        const ringRadius = 90;
-        const numSatellitesInRing = 6;
-        for (let i = 0; i < numSatellitesInRing; i++) {
-            const angle = (i / numSatellitesInRing) * Math.PI * 2;
-            const x = Math.cos(angle) * ringRadius;
-            const z = Math.sin(angle) * ringRadius;
-            const y = Math.sqrt(145 * 145 - ringRadius * ringRadius);
-            const position = new THREE.Vector3(x, y, z);
-            const satellite = new Satellite(position, scene, params.satelliteCoverageRadius);
-            satellites.push(satellite);
-        }
+export function buildRing(scene, satellites, params) {
+    const ringRadius = 90;
+    const numSatellitesInRing = 6;
+    for (let i = 0; i < numSatellitesInRing; i++) {
+        const angle = (i / numSatellitesInRing) * Math.PI * 2;
+        const x = Math.cos(angle) * ringRadius;
+        const z = Math.sin(angle) * ringRadius;
+        const y = Math.sqrt(145 * 145 - ringRadius * ringRadius);
+        const position = new THREE.Vector3(x, y, z);
+        const satellite = new Satellite(position, scene, params.satelliteCoverageRadius);
+        satellites.push(satellite);
     }
+}
 
-    // Phase 3: Expansion
+export function expandConstellation(scene, satellites, params) {
+    let satellitesAdded = false;
     const satellitesToAdd = [];
+    const orbitalRadius = 145;
+
     satellites.forEach(satellite => {
         if (satellite.status === 'Green' || satellite.status === 'Yellow') {
-            // Attempt to place two new neighbors
-            for (let i = 0; i < 2; i++) {
-                const newPosition = satellite.mesh.position.clone().add(new THREE.Vector3(Math.random() * 100 - 50, Math.random() * 100 - 50, Math.random() * 100 - 50));
-                newPosition.normalize().multiplyScalar(145);
+            const currentPos = satellite.mesh.position;
+
+            // 1. Get satellite's velocity vector (tangent to the orbit)
+            const up = new THREE.Vector3(0, 1, 0); // Assuming orbit is around Y-axis
+            const velocity = new THREE.Vector3().crossVectors(up, currentPos).normalize();
+
+            // 2. Get the "right" and "left" vectors in the orbital plane
+            const right = velocity.clone();
+            const left = velocity.clone().negate();
+
+            // 3. Create potential new positions
+            const potentialPositions = [
+                currentPos.clone().add(right.multiplyScalar(params.maxPlacementDistance - 0.5)),
+                currentPos.clone().add(left.multiplyScalar(params.maxPlacementDistance - 0.5))
+            ];
+
+            potentialPositions.forEach(newPosition => {
+                newPosition.normalize().multiplyScalar(orbitalRadius);
 
                 // Check placement rules
                 let validPlacement = true;
-                if (satellite.mesh.position.distanceTo(newPosition) < params.minPlacementDistance || satellite.mesh.position.distanceTo(newPosition) > params.maxPlacementDistance) {
+                if (currentPos.distanceTo(newPosition) < params.minPlacementDistance || currentPos.distanceTo(newPosition) > params.maxPlacementDistance) {
                     validPlacement = false;
                 }
-                satellites.forEach(otherSatellite => {
+                for (const otherSatellite of satellites) {
                     if (otherSatellite.mesh.position.distanceTo(newPosition) < params.minPlacementDistance) {
                         validPlacement = false;
+                        break;
                     }
-                });
+                }
 
                 if (validPlacement) {
                     const newSatellite = new Satellite(newPosition, scene, params.satelliteCoverageRadius);
                     satellitesToAdd.push(newSatellite);
+                    satellitesAdded = true;
                 }
-            }
+            });
         }
     });
+
     satellites.push(...satellitesToAdd);
+    return satellitesAdded;
 }
 
-export function selfCorrect(scene, satellites, params) {
+export function selfCorrect(scene, satellites) {
     const redSatellites = satellites.filter(s => s.status === 'Red');
     if (redSatellites.length > 0) {
         redSatellites.forEach(s => {
             scene.remove(s.mesh);
             scene.remove(s.coverageSphere);
         });
-        satellites = satellites.filter(s => s.status !== 'Red');
+        // This function now returns a new array, it must be reassigned in the caller.
+        return { updatedSatellites: satellites.filter(s => s.status !== 'Red'), wasCorrected: true };
     }
+    return { updatedSatellites: satellites, wasCorrected: false };
 }
 
 export function updateCoverageVisualization(testPoints, satellites, params) {
     let coveredPoints = 0;
     testPoints.forEach(point => {
-        let covered = false;
-        satellites.forEach(satellite => {
+        let isCovered = false;
+        for (const satellite of satellites) {
             if (point.position.distanceTo(satellite.mesh.position) <= params.satelliteCoverageRadius) {
-                covered = true;
+                isCovered = true;
+                break;
             }
-        });
+        }
 
-        if (covered) {
+        if (isCovered) {
             point.mesh.material.color.setHex(0x808080); // Grey
             point.status = 'Grey';
             point.uncoveredTime = 0;
@@ -187,9 +202,5 @@ export function updateCoverageVisualization(testPoints, satellites, params) {
     });
 
     const coveragePercentage = (coveredPoints / testPoints.length) * 100;
-    if (coveragePercentage >= params.targetCoverage) {
-        // Stop the simulation
-        return true;
-    }
-    return false;
+    return coveragePercentage >= params.targetCoverage;
 }
